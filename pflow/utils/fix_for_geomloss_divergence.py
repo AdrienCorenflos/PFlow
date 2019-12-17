@@ -27,7 +27,7 @@ def max_diameter(x, y):
 def epsilon_schedule(p, diameter, blur, scaling):
     ε_s = [ diameter**p ] \
         + [ np.exp(e) for e in np.arange(p*np.log(diameter), p*np.log(blur), p*np.log(scaling)) ] \
-        + [ blur**p ]
+        + [ blur**p ] * 5
     return ε_s
 
 
@@ -66,7 +66,7 @@ class UnbalancedWeight(torch.nn.Module):
         return (self.ρ + self.ε/2) * x
 
     def backward(self, g):
-        return (self.ρ + self.ε)   * g
+        return (self.ρ + self.ε) * g
 
 
 def sinkhorn_cost(ε, ρ, α, β, a_x, b_y, a_y, b_x, batch=False, debias=True, potentials=False):
@@ -92,7 +92,7 @@ def sinkhorn_cost(ε, ρ, α, β, a_x, b_y, a_y, b_x, batch=False, debias=True, 
                      + scal( β, UnbalancedWeight(ε, ρ)( 1 - (-a_y/ρ).exp() ), batch=batch )
 
 
-def sinkhorn_loop( softmin, α_logs, β_logs, C_xxs, C_yys, C_xys, C_yxs, ε_s, ρ, 
+def sinkhorn_loop(softmin, α_logs, β_logs, C_xxs, C_yys, C_xys, C_yxs, ε_s, ρ,
                    jumps=[], kernel_truncation=None, truncate=5, cost=None,
                    extrapolate=None, debias=True, last_extrapolation=True ):
     

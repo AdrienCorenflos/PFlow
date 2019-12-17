@@ -1,21 +1,56 @@
 import abc
-import torch
+import math
+
+
+def _log_mean_exp(logw):
+    max_ = logw.max()
+    v = (logw - max_).exp()
+    return max_ + v.sum().log()
+
+
+class LikelihoodMethodBase(metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    def apply(self, state, observation, log=True):
+        """
+        :param state: FilterState
+            current state of the filter
+        :param observation: ObservationBase
+        :param log: bool
+            Return the loglikelihood of the state or the likelihood
+        :return: torch.float
+            The log-likelihood or the likelihood
+        """
+
+
+class ProposalMethodBase(metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    def apply(self, state, observation):
+        """
+        :param state: FilterState
+            current state of the filter
+        :param observation: ObservationBase
+        :return: State
+            Proposal state
+        """
 
 
 class FilterState:
-    __slots__ = ['x', 'w', 'loglik', 'n']
+    __slots__ = ['x', 'w', 'logw', 'loglik', 'n', 'marginal_log_likelihood']
 
-    def __init__(self, x, w, n, loglik):
+    def __init__(self, x, logw, n, loglik, marginal_log_likelihood=0.):
         """
         :param x: torch.Tensor[N, D]
-        :param w: torch.Tensor[N]
+        :param logw: torch.Tensor[N]
         :param n: int: N
         :param loglik: torch.FloatTensor
+        :param marginal_log_likelihood: torch.FloatTensor
         """
-        self.w = w
+        self.w = logw.exp()
+        self.logw = logw
         self.x = x
         self.loglik = loglik
         self.n = n
+        self.marginal_log_likelihood = marginal_log_likelihood
 
 
 class ObservationBase(metaclass=abc.ABCMeta):
@@ -23,15 +58,20 @@ class ObservationBase(metaclass=abc.ABCMeta):
     pass
 
 
-def _normalise(w):
+def _normalise(w, log=True):
     """
     :param w: torch.Tensor[N]
+    :param log: bool
     :return: torch.Tensor[N]
     """
+    if log:
+        return w - w.logsumexp(0)
     return w / w.sum()
 
 
 class BootstrapFilter:
+    MIN_W = 1/100
+
     def __init__(self,
                  proposal_method,
                  likelihood_method,
@@ -59,20 +99,27 @@ class BootstrapFilter:
         if neff < self.min_neff * state.n:
             state = self._reweight(state, observation)
 
-        likelihood = self.likelihood_method.apply(state, observation)
-        prior_weights = state.w
-        posterior_weights = likelihood * prior_weights
+        likelihood = self.likelihood_method.apply(state, observation, log=True)
+        prior_log_weights = state.logw
+        posterior_log_weights = likelihood + prior_log_weights
+        posterior_log_weights = posterior_log_weights.clamp(min=math.log(self.MIN_W/state.n), max=0.)
         previous_log_likelihood = state.loglik
-        marginal_likelihood = torch.mean(posterior_weights)
-        posterior_weights = _normalise(posterior_weights)
+        marginal_log_likelihood = _log_mean_exp(posterior_log_weights)
+        posterior_weights = _normalise(posterior_log_weights, log=True)
+        log_lik_increment = marginal_log_likelihood - state.marginal_log_likelihood
         return FilterState(x=state.x,
-                           w=posterior_weights,
+                           logw=posterior_weights,
                            n=state.n,
-                           loglik=previous_log_likelihood + marginal_likelihood.log())
+                           loglik=previous_log_likelihood + log_lik_increment,
+                           marginal_log_likelihood=marginal_log_likelihood)
 
     def _reweight(self, state, _observation):
-        x, w = self.reweighting_method.apply(state.x, state.w)
-        return FilterState(x=x, w=w, n=state.n, loglik=state.loglik)
+        x, logw = self.reweighting_method.apply(state.x, state.w, state.logw)
+        return FilterState(x=x,
+                           logw=logw,
+                           n=state.n,
+                           loglik=state.loglik,
+                           marginal_log_likelihood=0.)
 
     @staticmethod
     def _neff(w):
@@ -84,4 +131,4 @@ class BootstrapFilter:
 
     def filter(self, state, observation):
         proposal = self.proposal_method(state, observation)
-        return self.update(state, observation)
+        return self.update(proposal, observation)
