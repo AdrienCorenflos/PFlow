@@ -1,74 +1,81 @@
-import geomloss as gl
 import torch
 import numpy as np
-from pflow.base import BaseReweight
+from pflow.base import BaseReweight, NoResampling
+from pflow.utils.fix_for_geomloss_losses import SamplesLoss
 
 
-def _learn(x, w, loss, adam_kwargs, n_steps):
+def _learn(x, logw, loss, adam_kwargs, n_steps, init_x):
     """
     Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
     :param x: torch.Tensor[N, D]
         The input
     :param w: torch.Tensor[N]
-        The degenerate weights
+        The degenerate log weights
     :param loss: geomloss.SamplesLoss
         Needs to be biased for the potentials to correspond to a proper plan
     :param eps: float
         Blur parameter used in loss
     :param adam_kwargs: dict
         arguments for adam
-    :param n_steps: number of steps for optimisation
+    :param n_steps: int
+        number of steps for optimisation
+    :param init_x: tensor
+        where to start
     """
+
     n = x.shape[0]
-    uniform_weights = torch.full_like(w, 1 / n, requires_grad=False)
-    x_i = x.clone()
-    x_i.requires_grad = True
+    uniform_weights = torch.full_like(logw, np.log(1 / n), requires_grad=False)
+    x_i = init_x.clone().detach().requires_grad_(True)
 
     adam = torch.optim.Adam([x_i], **adam_kwargs)
 
     for _ in range(n_steps):
+        loss_val = loss(uniform_weights, x_i, logw.detach(), x.detach())
         adam.zero_grad()
-        loss_val = loss(uniform_weights, x_i, w, x)
         loss_val.backward()
         adam.step()
     return x_i, uniform_weights
 
 
-def _incremental_learning(x, w, loss, n_steps=5, lr=1., inner_steps=5):
+def _incremental_learning(x, w, loss, adam_kwargs, n_steps=5, inner_steps=5):
     """
     Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
     :param x: torch.Tensor[N, D]
         The input
-    :param w: torch.Tensor[N]
-        The degenerate weights
+    :param logw: torch.Tensor[N]
+        The degenerate logweights
     :param loss: geomloss.SamplesLoss
         Needs to be biased for the potentials to correspond to a proper plan
     :param n_steps: int
         number of steps from degenerate to uniform
     :param inner_steps: int
         inner steps for one set of weights to the next
+    :param adam_kwargs: dict
+        arguments for adam
     """
+    n = x.shape[0]
     ts = np.linspace(0., 1., n_steps + 1)
 
-    x_i, x_j = x.clone(), x.clone()
-    x_i.requires_grad = True
+    x_j = x.clone().detach()
+    x_i = x.clone().detach().requires_grad_(True)
+    adam = torch.optim.Adam([x_i], **adam_kwargs)
 
-    ones = torch.ones_like(w, requires_grad=False)
-    ones /= ones.sum()
+    ones = torch.full_like(w, 1/n, requires_grad=False)
 
     for i in range(n_steps):
-        w_i = w * (1 - ts[i]) + ones * ts[i]
-        w_i_1 = w * (1 - ts[i + 1]) + ones * ts[i + 1]
+        w_i = w.detach() * (1 - ts[i]) + ones * ts[i]
+        w_i_1 = w.detach() * (1 - ts[i + 1]) + ones * ts[i + 1]
         for _ in range(inner_steps):
-            loss_val = loss(w_i_1, x_i, w_i, x_j)
-            [g] = torch.autograd.grad(loss_val, [x_i])
-            x_i.data -= lr * g * len(w)
+            loss_val = loss(w_i_1.log(), x_i, w_i.log(), x_j)
+            adam.zero_grad()
+            loss_val.backward()
+            adam.step()
         x_j.data.copy_(x_i.data)
-    return x_j, ones
+    return x_j, ones.log()
 
 
 class LearnBest(BaseReweight):
-    def __init__(self, epsilon, geomloss_kwargs, adam_kwargs, n_steps=20):
+    def __init__(self, epsilon, geomloss_kwargs, adam_kwargs, n_steps=20, start_from_systematic=False, jitter=0.):
         """
         Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
         :param epsilon: float
@@ -79,15 +86,27 @@ class LearnBest(BaseReweight):
             dict for Sinkhorn loss
         :param n_steps: int
             number of epochs
+        :param start_from_systematic: bool
+            initialisation for the learning
+        :param jitter: float
+            jitter the initial state
         """
+        from pflow.resampling.systematic import SystematicResampling
         self.epsilon = epsilon
         geomloss_kwargs.pop('blur', None)
         geomloss_kwargs.pop('potentials', None)
+        geomloss_kwargs.pop('debias', None)
         self.adam_kwargs = adam_kwargs
         self.n_steps = n_steps
-        self.sample_loss = gl.SamplesLoss(blur=epsilon, potentials=False, **geomloss_kwargs)
+        self.sample_loss = SamplesLoss(blur=epsilon, is_log=True, debias=True, potentials=False, **geomloss_kwargs)
+        self.start_from_systematic = start_from_systematic
+        if start_from_systematic:
+            self._subSample = SystematicResampling()
+        else:
+            self._subSample = NoResampling()
+        self.jitter = jitter
 
-    def apply(self, x, w):
+    def apply(self, x, w, logw):
         """
         Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
         :param x: torch.Tensor[N, D]
@@ -95,31 +114,34 @@ class LearnBest(BaseReweight):
         :param w: torch.Tensor[N]
             The degenerate weights
         """
-        return _learn(x, w, self.sample_loss, self.adam_kwargs, self.n_steps)
+        init_x, _ = self._subSample.apply(x, w, logw)
+        init_x += torch.normal(0., self.jitter, init_x.shape)
+        return _learn(x, logw, self.sample_loss, self.adam_kwargs, self.n_steps, init_x)
 
 
-class IncrementalLeanring(BaseReweight):
-    def __init__(self, epsilon, geomloss_kwargs, lr=1., n_steps=4, inner_steps=5):
+class IncrementalLearning(BaseReweight):
+    def __init__(self, epsilon, geomloss_kwargs, adam_kwargs, n_steps=5, inner_steps=5):
         """
         Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
         :param epsilon: float
             Blur parameter used in loss
-        :param lr: float
-            learning rate
         :param geomloss_kwargs: dict
             dict for Sinkhorn loss
+        :param adam_kwargs: dict
+            parameters for the adam optimizer
         :param n_steps: int
             number of epochs
         """
         self.epsilon = epsilon
+        self.adam_kwargs = adam_kwargs
         geomloss_kwargs.pop('blur', None)
         geomloss_kwargs.pop('potentials', None)
-        self.lr = lr
+        geomloss_kwargs.pop('debias', None)
         self.n_steps = n_steps
-        self.sample_loss = gl.SamplesLoss(blur=epsilon, potentials=False, **geomloss_kwargs)
+        self.sample_loss = SamplesLoss(blur=epsilon, is_log=True, debias=True, potentials=False, **geomloss_kwargs)
         self.inner_steps = inner_steps
 
-    def apply(self, x, w):
+    def apply(self, x, w, _logw):
         """
         Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
         :param x: torch.Tensor[N, D]
@@ -127,8 +149,8 @@ class IncrementalLeanring(BaseReweight):
         :param w: torch.Tensor[N]
             The degenerate weights
         """
-        return _incremental_learning(x, w, self.sample_loss, self.n_steps, self.lr, self.inner_steps)
-
+        return _incremental_learning(x, w, self.sample_loss, self.adam_kwargs, self.n_steps,
+                                     self.inner_steps)
 
 # def recenter_from_proposal(x, w_y, y, lr=1., n_iter=50, **kwargs):
 #     uniform = torch.ones_like(w_y)

@@ -26,18 +26,20 @@ def transport_from_potentials(x, f, g, eps, w, n, p):
     else:
         cost = squared_distances(x, x) / p
     fg = f.T + g
-    temp = ((fg - cost) / eps ** p)
-    transport = torch.exp(temp) * w.unsqueeze(0) / n
+    denominator = eps ** p
 
-    factor = n * transport.sum(1).unsqueeze(1)
-    transport /= factor
+    temp = (fg - cost)
+    temp.clamp_min(-2 * denominator * math.log(n))
+    temp /= denominator
 
-    transport *= n
+    transport_matrix = temp.exp() * w.unsqueeze(0) / n
+    transport_matrix /= transport_matrix.sum(1).unsqueeze(1)
 
-    return transport @ x, torch.full_like(w, math.log(1 / n), requires_grad=True)
+    return transport_matrix @ x, torch.full_like(w, math.log(1/n), requires_grad=True)
 
 
 def solve_for_state(x, logw, loss, n):
+    
     """
     Use Geomloss to find the transportation potentials for (x, w) to (w, 1/N)
 
@@ -56,7 +58,7 @@ def solve_for_state(x, logw, loss, n):
     return alpha, beta
 
 
-def reweight(x, logw, w, loss, eps, p):
+def transport(x, logw, w, loss, eps, p):
     """
     Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
     :param x: torch.Tensor[N, D]
@@ -89,4 +91,4 @@ class Transport(BaseReweight):
                                        is_log=True, **geomloss_kwargs)
 
     def apply(self, x, w, logw):
-        return reweight(x, logw, w, self.sample_loss, self.epsilon, self.p)
+        return transport(x, logw, w, self.sample_loss, self.epsilon, self.p)

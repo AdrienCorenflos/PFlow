@@ -238,12 +238,11 @@ aps,
 		We therefore aim at minimising 
 		
 		\begin{align*} 
-		S_\epsilon(\cdot)_{X, w} 
-			&= OT_{\epsilon}\left(\frac 1 N, \cdot, w, X\right) \\
-			&- 0.5 OT_\epsilon\left(\frac 1 N, \cdot, \frac 1 N, \cdot \right) \\ 
-			&- 0.5 OT_\epsilon(w, X, w, X)
+			S_\epsilon(\cdot)_{X, w} 
+				&= OT_{\epsilon}\left(\frac 1 N, \cdot, w, X\right) \\
+				&- 0.5 OT_\epsilon\left(\frac 1 N, \cdot, \frac 1 N, \cdot \right) \\ 
+				&- 0.5 OT_\epsilon(w, X, w, X)
 		\end{align*}
-		
 		
 		This is done via a gradient descent leveraging Adam.
 		
@@ -267,7 +266,7 @@ aps,
 		
 		\begin{align*} 
 			S_\epsilon(\cdot)_{X, w} 
-			&= OT_{\epsilon}\left(\frac 1 N, \cdot, w, X\right) \\
+			=& OT_{\epsilon}\left(\frac 1 N, \cdot, w, X\right) \\
 			&- 0.5 OT_\epsilon\left(\frac 1 N, \cdot, \frac 1 N, \cdot \right) \\ 
 			&- 0.5 OT_\epsilon(w, X, w, X)algorithm
 		\end{align*}
@@ -289,7 +288,7 @@ aps,
 					\STATE $y_k = x_i$
 					\FOR{$k=1$ {\bfseries to} $K$}
 						$y_k = y_k - \lambda \nabla_y S_\epsilon(S_\epsilon(x_i, w_i, y_k, w_{i+1})
-					\ENDFOR
+				\ENDFOR
 					\STATE x_i = y_k
 				\ENDFOR
 			\end{algorithmic}

@@ -70,7 +70,7 @@ def _normalise(w, log=True):
 
 
 class BootstrapFilter:
-    MIN_W = 1/100
+    MIN_W = 1 / 100
 
     def __init__(self,
                  proposal_method,
@@ -102,7 +102,7 @@ class BootstrapFilter:
         likelihood = self.likelihood_method.apply(state, observation, log=True)
         prior_log_weights = state.logw
         posterior_log_weights = likelihood + prior_log_weights
-        posterior_log_weights = posterior_log_weights.clamp(min=math.log(self.MIN_W/state.n), max=0.)
+        posterior_log_weights = posterior_log_weights.clamp(-10*math.log(state.n), 0.)
         previous_log_likelihood = state.loglik
         marginal_log_likelihood = _log_mean_exp(posterior_log_weights)
         posterior_weights = _normalise(posterior_log_weights, log=True)

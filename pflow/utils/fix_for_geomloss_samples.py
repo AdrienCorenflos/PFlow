@@ -13,11 +13,11 @@ try:  # Import the keops library, www.kernel-operations.io
 except:
     keops_available = False
 
-from geomloss.utils import scal, squared_distances, distances
+from geomloss.utils import squared_distances, distances
 
-from geomloss.sinkhorn_divergence import epsilon_schedule, scaling_parameters
-from geomloss.sinkhorn_divergence import dampening, log_weights, sinkhorn_cost
-from pflow.utils.fix_for_geomloss_divergence import sinkhorn_loop
+from geomloss.sinkhorn_divergence import scaling_parameters
+from geomloss.sinkhorn_divergence import log_weights
+from pflow.utils.fix_for_geomloss_divergence import sinkhorn_loop, sinkhorn_cost
 
 # ==============================================================================
 #                          backend == "tensorized"
@@ -27,6 +27,7 @@ cost_routines = {
     1: (lambda x, y: distances(x, y)),
     2: (lambda x, y: squared_distances(x, y) / 2),
 }
+
 
 class Softmin(torch.autograd.Function):
 
@@ -49,7 +50,9 @@ class Softmin(torch.autograd.Function):
         grad = grad_output * ((temp_exp / temp_exp_sum).clamp(0., 1.))
         return None, grad, -epsilon * grad
 
+
 softmin_tensorized = Softmin.apply
+
 
 def sinkhorn_tensorized(α, x, β, y, p=2, blur=.05, reach=None, diameter=None, scaling=.5, cost=None,
                         debias=True, potentials=False, is_log=True, **kwargs):
@@ -65,7 +68,6 @@ def sinkhorn_tensorized(α, x, β, y, p=2, blur=.05, reach=None, diameter=None, 
     diameter, ε, ε_s, ρ = scaling_parameters(x, y, p, blur, reach, diameter, scaling)
 
     if is_log:
-        assert not debias
         log_alpha, log_beta = α, β
         alpha, beta = α.exp(), β.exp()
     else:
@@ -79,7 +81,8 @@ def sinkhorn_tensorized(α, x, β, y, p=2, blur=.05, reach=None, diameter=None, 
                                        ε_s, ρ,
                                        debias=debias)
 
-    return sinkhorn_cost(ε, ρ, alpha, beta, a_x, b_y, a_y, b_x, batch=True, debias=debias, potentials=potentials)
+    return sinkhorn_cost(ε, ρ, alpha, beta, a_x, b_y, a_y, b_x, batch=True, debias=debias, potentials=potentials,
+                         is_log=is_log)
 
 
 # ==============================================================================

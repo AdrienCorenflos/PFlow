@@ -15,3 +15,8 @@ class BaseReweight(metaclass=abc.ABCMeta):
          :return
             x, logw the corrected particles and weights
          """
+
+
+class NoResampling(BaseReweight):
+    def apply(self, x, w, logw):
+        return x, logw
