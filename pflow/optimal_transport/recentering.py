@@ -1,10 +1,14 @@
-import torch
 import numpy as np
+import torch
+
 from pflow.base import BaseReweight, NoResampling
+from pflow.optimal_transport.transportation_plan import Transport
+from pflow.resampling.systematic import SystematicResampling
 from pflow.utils.fix_for_geomloss_losses import SamplesLoss
 
 
-def _learn(x, logw, loss, adam_kwargs, n_steps, init_x):
+def _learn(x, logw, loss, optim_kwargs, schedule_kwargs, n_steps, init_x, optim_class_name='Adam',
+           scheduler_class_name='StepLR'):
     """
     Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
     :param x: torch.Tensor[N, D]
@@ -13,27 +17,41 @@ def _learn(x, logw, loss, adam_kwargs, n_steps, init_x):
         The degenerate log weights
     :param loss: geomloss.SamplesLoss
         Needs to be biased for the potentials to correspond to a proper plan
-    :param eps: float
-        Blur parameter used in loss
-    :param adam_kwargs: dict
-        arguments for adam
+    :param optim_kwargs: dict
+        arguments for optimizer
+    :param schedule_kwargs: dict
+        arguments for lr scheduler
     :param n_steps: int
         number of steps for optimisation
     :param init_x: tensor
         where to start
+    :param optim_class_name: str
+        Name of the optimizer
+    :param scheduler_class_name: str
+        Name of the scheduler
     """
 
     n = x.shape[0]
     uniform_weights = torch.full_like(logw, np.log(1 / n), requires_grad=False)
     x_i = init_x.clone().detach().requires_grad_(True)
 
-    adam = torch.optim.Adam([x_i], **adam_kwargs)
+    optimizer_class = getattr(torch.optim, optim_class_name)
+    optimizer = optimizer_class([x_i], **optim_kwargs)
+    scheduler_class = getattr(torch.optim.lr_scheduler, scheduler_class_name)
+
+    scheduler = scheduler_class(optimizer, **schedule_kwargs)
+
+    def closure():
+        optimizer.zero_grad()
+        loss_val = loss(uniform_weights, x_i, logw.detach(), x.detach())
+        loss_val.backward()
+        return loss_val
 
     for _ in range(n_steps):
-        loss_val = loss(uniform_weights, x_i, logw.detach(), x.detach())
-        adam.zero_grad()
-        loss_val.backward()
-        adam.step()
+        # loss_val = loss(uniform_weights, x_i, logw.detach(), x.detach())
+        optimizer.zero_grad()
+        optimizer.step(closure)
+        scheduler.step()
     return x_i, uniform_weights
 
 
@@ -60,7 +78,7 @@ def _incremental_learning(x, w, loss, adam_kwargs, n_steps=5, inner_steps=5):
     x_i = x.clone().detach().requires_grad_(True)
     adam = torch.optim.Adam([x_i], **adam_kwargs)
 
-    ones = torch.full_like(w, 1/n, requires_grad=False)
+    ones = torch.full_like(w, 1 / n, requires_grad=False)
 
     for i in range(n_steps):
         w_i = w.detach() * (1 - ts[i]) + ones * ts[i]
@@ -75,33 +93,57 @@ def _incremental_learning(x, w, loss, adam_kwargs, n_steps=5, inner_steps=5):
 
 
 class LearnBest(BaseReweight):
-    def __init__(self, epsilon, geomloss_kwargs, adam_kwargs, n_steps=20, start_from_systematic=False, jitter=0.):
+    def __init__(self,
+                 epsilon,
+                 geomloss_kwargs,
+                 learning_rate,
+                 optimizer_kwargs=None,
+                 schedule_kwargs=None,
+                 n_steps=10,
+                 start_from_systematic=False,
+                 start_from_regularised=False,
+                 jitter=0.,
+                 optim_class_name='SGD',
+                 scheduler_class_name='StepLR'
+                 ):
         """
         Combine solve_for_state and transport_from_potentials in a "reweighting scheme"
         :param epsilon: float
             Blur parameter used in loss
-        :param adam_kwargs: dict
-            parameters for the adam optimizer
         :param geomloss_kwargs: dict
-            dict for Sinkhorn loss
+            dict for Sinkhorn
+        :param learning_rate: float
+            for the optimizer
+        :param optimizer_kwargs: dict
+            parameters for the adam optimizer
         :param n_steps: int
             number of epochs
         :param start_from_systematic: bool
-            initialisation for the learning
+            initialisation from the systematic resampling - not proven to be differentiable
+        :param start_from_regularised: bool
+            initialise from the regularised ensemble transform
         :param jitter: float
             jitter the initial state
+        :param optim_class_name: str
+            Name of the optimizer
+        :param scheduler_class_name: str
+            Name of the scheduler
         """
-        from pflow.resampling.systematic import SystematicResampling
         self.epsilon = epsilon
         geomloss_kwargs.pop('blur', None)
         geomloss_kwargs.pop('potentials', None)
         geomloss_kwargs.pop('debias', None)
-        self.adam_kwargs = adam_kwargs
+        self.learning_rate = learning_rate
+        self.optimizer_kwargs = optimizer_kwargs or {}
+        self.optim_class_name = optim_class_name
+        self.scheduler_class_name = scheduler_class_name
+        self.schedule_kwargs = schedule_kwargs
         self.n_steps = n_steps
         self.sample_loss = SamplesLoss(blur=epsilon, is_log=True, debias=True, potentials=False, **geomloss_kwargs)
-        self.start_from_systematic = start_from_systematic
         if start_from_systematic:
             self._subSample = SystematicResampling()
+        elif start_from_regularised:
+            self._subSample = Transport(epsilon, **geomloss_kwargs)
         else:
             self._subSample = NoResampling()
         self.jitter = jitter
@@ -115,8 +157,11 @@ class LearnBest(BaseReweight):
             The degenerate weights
         """
         init_x, _ = self._subSample.apply(x, w, logw)
-        init_x += torch.normal(0., self.jitter, init_x.shape)
-        return _learn(x, logw, self.sample_loss, self.adam_kwargs, self.n_steps, init_x)
+        optimizer_kwargs = self.optimizer_kwargs.copy()
+        optimizer_kwargs['lr'] = self.learning_rate * init_x.shape[0]
+        return _learn(x, logw, self.sample_loss, optimizer_kwargs, self.schedule_kwargs, self.n_steps,
+                      init_x + self.jitter * torch.normal(0., 1., init_x.shape),
+                      self.optim_class_name, self.scheduler_class_name)
 
 
 class IncrementalLearning(BaseReweight):

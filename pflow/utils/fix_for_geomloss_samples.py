@@ -81,8 +81,7 @@ def sinkhorn_tensorized(α, x, β, y, p=2, blur=.05, reach=None, diameter=None, 
                                        ε_s, ρ,
                                        debias=debias)
 
-    return sinkhorn_cost(ε, ρ, alpha, beta, a_x, b_y, a_y, b_x, batch=True, debias=debias, potentials=potentials,
-                         is_log=is_log)
+    return sinkhorn_cost(ε, ρ, alpha, beta, a_x, b_y, a_y, b_x, batch=True, debias=debias, potentials=potentials)
 
 
 # ==============================================================================

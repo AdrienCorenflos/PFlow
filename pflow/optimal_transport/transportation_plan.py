@@ -5,7 +5,7 @@ import math
 from pflow.utils.fix_for_geomloss_losses import SamplesLoss
 
 
-def transport_from_potentials(x, f, g, eps, w, n, p):
+def transport_from_potentials(x, f, g, eps, logw, n, p):
     """
     To get the transported particles from the sinkhorn iterates
 
@@ -16,7 +16,7 @@ def transport_from_potentials(x, f, g, eps, w, n, p):
     :param g: torch.Tensor[N]
         Potential, output of the sinkhorn iterates
     :param eps: float
-    :param w: torch.Tensor[N]
+    :param logw: torch.Tensor[N]
     :param n: int
     :param p: int
     :return: torch.Tensor[N, D], torch.Tensor[N]
@@ -29,13 +29,13 @@ def transport_from_potentials(x, f, g, eps, w, n, p):
     denominator = eps ** p
 
     temp = (fg - cost)
-    temp.clamp_min(-2 * denominator * math.log(n))
+    temp.clamp_min(-3 * denominator * math.log(n))
     temp /= denominator
 
-    transport_matrix = temp.exp() * w.unsqueeze(0) / n
+    transport_matrix = (temp + logw.unsqueeze(0)).exp() / n
     transport_matrix /= transport_matrix.sum(1).unsqueeze(1)
 
-    return transport_matrix @ x, torch.full_like(w, math.log(1/n), requires_grad=True)
+    return transport_matrix @ x, torch.full_like(logw, math.log(1/n), requires_grad=True)
 
 
 def solve_for_state(x, logw, loss, n):
@@ -76,8 +76,8 @@ def transport(x, logw, w, loss, eps, p):
     """
     n = x.shape[0]
     alpha, beta = solve_for_state(x, logw, loss, n)
-    x_tilde, w_tilde = transport_from_potentials(x, alpha, beta, eps, w, n, p)
-    return x_tilde, w_tilde
+    x_tilde, logw_tilde = transport_from_potentials(x, alpha, beta, eps, logw, n, p)
+    return x_tilde, logw_tilde
 
 
 class Transport(BaseReweight):
